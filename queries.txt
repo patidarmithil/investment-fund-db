@@ -1,0 +1,81 @@
+SELECT
+  a.account_id,
+  a.investor_id,
+  i.name                AS investor_name,
+  a.fund_id,
+  f.fund_name,
+  m.manager_id,
+  m.name                AS manager_name,
+  a.units,
+  fn_get_latest_nav(a.fund_id) AS latest_nav,
+  ROUND(a.units * IFNULL(fn_get_latest_nav(a.fund_id), 0), 2) AS estimated_account_value
+FROM investor_accounts a
+JOIN investors i ON a.investor_id = i.investor_id
+JOIN funds f     ON a.fund_id     = f.fund_id
+JOIN managers m  ON f.manager_id  = m.manager_id
+WHERE a.account_id = 'A1001';   -- change to any account_id or remove WHERE to list all accounts
+
+
+SELECT
+  f.fund_id,
+  f.fund_name,
+  COUNT(a.account_id) AS num_accounts,
+  ROUND(SUM(a.total_invested), 2) AS total_invested_aum,
+  ROUND(SUM(a.units * IFNULL(fn_get_latest_nav(a.fund_id), 0)), 2) AS estimated_aum
+FROM funds f
+LEFT JOIN investor_accounts a ON a.fund_id = f.fund_id
+GROUP BY f.fund_id, f.fund_name
+HAVING total_invested_aum > 1000000
+ORDER BY total_invested_aum DESC;
+
+
+
+START TRANSACTION;
+
+-- set application user for audit triggers (if used)
+SET @app_user = 'U005';
+
+-- 1) Insert a debit Transfer transaction on source account
+INSERT INTO transactions
+(txn_id, account_id, txn_type, amount, currency, txn_date, status, related_txn)
+VALUES ('T90001', 'A1002', 'Transfer', 50000.00, 'INR', CURRENT_DATE(), 'Completed', NULL);
+
+-- save a point before updating accounts
+SAVEPOINT sp_before_account_update;
+
+-- 2) Update source account totals (simple example; normally the trigger handles it)
+UPDATE investor_accounts
+SET total_invested = total_invested - 50000.00,
+    units = units - ROUND(50000.00 / IFNULL(fn_get_latest_nav(fund_id),1), 8)
+WHERE account_id = 'A1002';
+
+-- If you detect a problem you can rollback to the savepoint:
+-- ROLLBACK TO SAVEPOINT sp_before_account_update;
+
+-- Otherwise commit the overall changes
+COMMIT;
+
+
+
+SELECT
+  f.fund_id,
+  f.fund_name,
+  ROUND(SUM(fh.quantity * fh.avg_price), 2) AS total_holdings_value
+FROM fund_holdings fh
+JOIN funds f ON fh.fund_id = f.fund_id
+GROUP BY f.fund_id, f.fund_name
+ORDER BY total_holdings_value DESC
+LIMIT 5;
+
+
+CREATE OR REPLACE VIEW vw_fund_aum AS
+SELECT
+  f.fund_id,
+  f.fund_name,
+  ROUND(COALESCE(SUM(a.total_invested),0),2) AS total_invested_aum,
+  ROUND(COALESCE(SUM(a.units * IFNULL(fn_get_latest_nav(a.fund_id),0)),0),2) AS estimated_aum
+FROM funds f
+LEFT JOIN investor_accounts a ON a.fund_id = f.fund_id
+GROUP BY f.fund_id, f.fund_name;
+
+SELECT * FROM vw_fund_aum WHERE estimated_aum > 10000000;
